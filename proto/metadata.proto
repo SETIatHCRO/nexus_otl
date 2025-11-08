@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package tutorial;
+
+message Metadata {
+    map<string, Metadatum> data = 1;
+}
+
+message Metadatum {
+    oneof value {
+        double f64 = 2;
+        float f32 = 3;
+        int64 i64 = 4;
+        uint64 u64 = 5;
+        bool boolean = 6;
+        string string = 7;
+        bytes bytes = 8;
+    };
+}
