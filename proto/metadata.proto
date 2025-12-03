@@ -1,19 +1,36 @@
 syntax = "proto3";
 
-package tutorial;
+package Nexus;
 
+// A response message mapping metadata keys to scalar values.
+// Each key is a path-like string with '/' delimiters.
 message Metadata {
     map<string, Metadatum> data = 1;
 }
 
+// The scalar value message for each metadata value.
 message Metadatum {
     oneof value {
-        double f64 = 2;
-        float f32 = 3;
-        int64 i64 = 4;
-        uint64 u64 = 5;
-        bool boolean = 6;
-        string string = 7;
-        bytes bytes = 8;
+        double f64 = 1;
+        float f32 = 2;
+        int64 i64 = 3;
+        uint64 u64 = 4;
+        bool boolean = 5;
+        string string = 6;
+        bytes bytes = 7;
     };
+}
+
+// A request message listing metadata keys to be returned.
+// Each key is a path-like string with '/' delimiters, and 
+// an asterisk segment indicates `include all`.
+message MetadataRequest {
+    repeated string keys = 1;
+}
+
+// The Observatory Transactional Layer service which
+// provides the abstract interface to critical metadata.
+service OTL {
+    // Provides the requested Metadata
+    rpc get_metadata(MetadataRequest) returns (Metadata) {}
 }
