@@ -4,3 +4,4 @@ protoc
 *_pb2.pyi
 *_pb2_grpc.py
 __pycache__
+src/nexus_otl/_version.py
