@@ -14,9 +14,14 @@ def run():
     with grpc.insecure_channel("localhost:50051") as channel:
         stub = metadata_pb2_grpc.OTLStub(channel)
         response = stub.get_metadata(metadata_pb2.MetadataRequest(
-            keys=["/tuning_info/", "/iers/"]
+            keys=["/v1/observatory", "/v1/observation/iers/"]
         ))
-    print("Metadata received:\n", response.data)
+    keys = list(response.data.keys())
+    keys.sort()
+    print("Metadata received:\n", {
+        k: response.data[k]
+        for k in keys
+    })
 
 
 if __name__ == "__main__":

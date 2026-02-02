@@ -1,5 +1,6 @@
 from concurrent import futures
 import logging
+import time
 
 import grpc
 import metadata_pb2_grpc
@@ -60,16 +61,19 @@ class MetadataServer(metadata_pb2_grpc.OTLServicer):
         md_dict[join_as_path("/telescope_info", "altitude")] = t.altitude
 
         md_dict[join_as_path("/telescope_info", "antenna_position_frame")] = t.antenna_position_frame.value
-        assert t.antenna_position_frame.value == "xyz" # assuming this...
-        for ant_detail in t.antennas:
-            md_dict[join_as_path("/telescope_info", "antenna", ant_detail.name, "number")] = ant_detail.number
-            md_dict[join_as_path("/telescope_info", "antenna", ant_detail.name, "diameter")] = ant_detail.diameter
-            for i, p in enumerate("xyz"):
-                md_dict[join_as_path("/telescope_info", "antenna", ant_detail.name, "position", p)] = ant_detail.position[i]
+        md_dict[join_as_path("/telescope_info", "antenna", "len")] = len(t.antenna)
+        for ant_i, ant_detail in enumerate(t.antennas):
+            ant_path = join_as_path("/telescope_info", "antenna", ant_i)
+            md_dict[join_as_path(ant_path, "name")] = ant_detail.name
+            md_dict[join_as_path(ant_path, "number")] = ant_detail.number
+            md_dict[join_as_path(ant_path, "diameter")] = ant_detail.diameter
+            md_dict[join_as_path(ant_path, "position", "len")] = 3
+            for i in range(3):
+                md_dict[join_as_path(ant_path, "position", i)] = ant_detail.position[i]
             
         return md_dict
 
-    def _get_antenna_info(antennas: List[str]):
+    def _get_antenna_info(antennas: List[telinfo.AntennaDetail]):
         md_dict = {}
 
         antenna_names = [ad.name for ad in antennas]
@@ -77,17 +81,18 @@ class MetadataServer(metadata_pb2_grpc.OTLServicer):
         ant_map_radec = ata_control.get_ra_dec(antenna_names)
         ant_map_azel  = ata_control.get_az_el(antenna_names)
         
-        for ant_detail in antennas:
-            base_path = join_as_path("/antenna", ant_detail.name)
+        for ant_i, ant_detail in enumerate(antennas):
+            base_path = join_as_path("/v1/observatory/antenna", ant_detail.name)
+            md_dict[join_as_path(base_path, "number")] = ant_detail.number
             md_dict[join_as_path(base_path, "diameter")] = ant_detail.diameter
             for i, p in enumerate("xyz"):
                 md_dict[join_as_path(base_path, "position", p)] = ant_detail.position[i]
 
-            md_dict[join_as_path(base_path, "pointing", "source")] = ant_map_source[ant_detail.name]
-            md_dict[join_as_path(base_path, "pointing", "right_ascension_rad")] = ant_map_radec[ant_detail.name][0] * pi/12
-            md_dict[join_as_path(base_path, "pointing", "declination_rad")] = ant_map_radec[ant_detail.name][1] * pi/180
-            md_dict[join_as_path(base_path, "pointing", "azimuth_rad")] = ant_map_azel[ant_detail.name][0] * pi/180
-            md_dict[join_as_path(base_path, "pointing", "declination_rad")] = ant_map_azel[ant_detail.name][1] * pi/180
+            md_dict[join_as_path(base_path, "pointing", "source_name")] = ant_map_source[ant_detail.name]
+            md_dict[join_as_path(base_path, "pointing", "ra")] = ant_map_radec[ant_detail.name][0] * pi/12
+            md_dict[join_as_path(base_path, "pointing", "dec")] = ant_map_radec[ant_detail.name][1] * pi/180
+            md_dict[join_as_path(base_path, "pointing", "az")] = ant_map_azel[ant_detail.name][0] * pi/180
+            md_dict[join_as_path(base_path, "pointing", "el")] = ant_map_azel[ant_detail.name][1] * pi/180
 
         return md_dict
 
@@ -95,7 +100,7 @@ class MetadataServer(metadata_pb2_grpc.OTLServicer):
         md_dict = {}
 
         for tuning in "ABCD":
-            md_dict[join_as_path("/tuning", tuning, "frequency_MHz")] = ata_control.get_sky_freq(lo=tuning)
+            md_dict[join_as_path("/v1/observatory/tuning", tuning, "frequency")] = ata_control.get_sky_freq(lo=tuning)
 
         return md_dict
 
@@ -106,10 +111,11 @@ class MetadataServer(metadata_pb2_grpc.OTLServicer):
     def _get():
         t = telinfo.load_telescope_metadata("/opt/mnt/share/telinfo_ata.toml")
         md_dict = {}
-        md_dict[join_as_path("/telescope_info", "name")] = t.telescope_name
-        md_dict[join_as_path("/telescope_info", "longitude")] = t.longitude
-        md_dict[join_as_path("/telescope_info", "latitude")] = t.latitude
-        md_dict[join_as_path("/telescope_info", "altitude")] = t.altitude
+        md_dict[join_as_path("/v1/observatory", "time")] = time.time()
+        md_dict[join_as_path("/v1/observatory", "name")] = t.telescope_name
+        md_dict[join_as_path("/v1/observatory", "coordinates", "longitude")] = t.longitude
+        md_dict[join_as_path("/v1/observatory", "coordinates", "latitude")] = t.latitude
+        md_dict[join_as_path("/v1/observatory", "coordinates", "altitude")] = t.altitude
         md_dict.update(MetadataServer._get_antenna_info(t.antennas))
         md_dict.update(MetadataServer._get_tuning_info())
         return md_dict
@@ -121,9 +127,9 @@ class MetadataServer(metadata_pb2_grpc.OTLServicer):
 
         md_dict = {}
         pm_x, pm_y = iers_table.pm_xy(today.jd1, today.jd2)
-        md_dict[join_as_path("/iers", "pm_x_arcsec")] = pm_x.to(units.arcsec).value
-        md_dict[join_as_path("/iers", "pm_y_arcsec")] = pm_y.to(units.arcsec).value
-        md_dict[join_as_path("/iers", "ut1_utc")] = iers_table.ut1_utc(today.jd1, today.jd2).to(units.s).value
+        md_dict[join_as_path("/v1/observation/iers", "pm_x_arcsec")] = pm_x.to(units.arcsec).value
+        md_dict[join_as_path("/v1/observation/iers", "pm_y_arcsec")] = pm_y.to(units.arcsec).value
+        md_dict[join_as_path("/v1/observation/iers", "ut1_utc")] = iers_table.ut1_utc(today.jd1, today.jd2).to(units.s).value
         return md_dict
 
     def _construct_metadata(d: dict) -> Metadata:
@@ -148,14 +154,15 @@ class MetadataServer(metadata_pb2_grpc.OTLServicer):
         if len(request.keys) == 0:
             md_dict.update(MetadataServer._get())
         for key in request.keys:
-            if key == "/":
+            if key == "/v1/observatory":
                 md_dict.update(MetadataServer._get())
-            elif key.startswith("/iers/"):
+            elif key.startswith("/v1/observation/iers"):
                 md_dict.update(MetadataServer._get_iers())
-            elif key.startswith("/telescope_info/"):
-                md_dict.update(MetadataServer._get_telescope_info())
-            elif key.startswith("/tuning_info/"):
-                md_dict.update(MetadataServer._get_tuning_info())
+            else:
+                md_dict.update({
+                    "/v1/error/": f"Unexpected key '{key}'"
+                })
+                break
         return MetadataServer._construct_metadata(md_dict)
 
 
