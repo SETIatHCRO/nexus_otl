@@ -20,59 +20,6 @@ from astropy.utils import iers
 from metadata_pb2 import Metadata
 
 class MetadataServer(metadata_pb2_grpc.OTLServicer):
-    def _get_pointing(antenna_names: List[str]):
-        def _safe_ata_control_get(antlist, get_func):
-            ret = {}
-            for ant in antlist:
-                try:
-                    ret.update(get_func([ant]))
-                except:
-                    ret.update({ant: None})
-            return ret
-
-        source_s = _safe_ata_control_get(antenna_names, ata_control.get_eph_source)
-        radec_s = _safe_ata_control_get(antenna_names, ata_control.get_ra_dec)
-        azel_s  = _safe_ata_control_get(antenna_names, ata_control.get_az_el)
-
-        md_dict = {}
-        for ant_name in antenna_names:
-            md_dict[join_as_path("/pointing", ant_name, "source")] = source_s[ant_name]
-            md_dict[join_as_path("/pointing", ant_name, "right_ascension_rad")] = radec_s[ant_name][0] * pi/12
-            md_dict[join_as_path("/pointing", ant_name, "declination_rad")] = radec_s[ant_name][1] * pi/180
-            md_dict[join_as_path("/pointing", ant_name, "azimuth_rad")] = azel_s[ant_name][0] * pi/180
-            md_dict[join_as_path("/pointing", ant_name, "declination_rad")] = azel_s[ant_name][1] * pi/180
-
-        return md_dict
-
-    def _get_lo_frequency(lo: str):
-        skyfreq = ata_control.get_sky_freq(lo=lo)
-        md_dict = {}
-        md_dict[join_as_path("/frequency_MHz", "local_oscillator", lo)] = skyfreq
-        
-        return md_dict
-
-    def _get_telescope_info():
-        t = telinfo.load_telescope_metadata("/opt/mnt/share/telinfo_ata.toml")
-        
-        md_dict = {}
-        md_dict[join_as_path("/telescope_info", "name")] = t.telescope_name
-        md_dict[join_as_path("/telescope_info", "longitude")] = t.longitude
-        md_dict[join_as_path("/telescope_info", "latitude")] = t.latitude
-        md_dict[join_as_path("/telescope_info", "altitude")] = t.altitude
-
-        md_dict[join_as_path("/telescope_info", "antenna_position_frame")] = t.antenna_position_frame.value
-        md_dict[join_as_path("/telescope_info", "antenna", "len")] = len(t.antenna)
-        for ant_i, ant_detail in enumerate(t.antennas):
-            ant_path = join_as_path("/telescope_info", "antenna", ant_i)
-            md_dict[join_as_path(ant_path, "name")] = ant_detail.name
-            md_dict[join_as_path(ant_path, "number")] = ant_detail.number
-            md_dict[join_as_path(ant_path, "diameter")] = ant_detail.diameter
-            md_dict[join_as_path(ant_path, "position", "len")] = 3
-            for i in range(3):
-                md_dict[join_as_path(ant_path, "position", i)] = ant_detail.position[i]
-            
-        return md_dict
-
     def _get_antenna_info(antennas: List[telinfo.AntennaDetail]):
         md_dict = {}
 
@@ -103,10 +50,6 @@ class MetadataServer(metadata_pb2_grpc.OTLServicer):
             md_dict[join_as_path("/v1/observatory/tuning", tuning, "frequency")] = ata_control.get_sky_freq(lo=tuning)
 
         return md_dict
-
-    def _get_mcast_group(antenna: str, lo: str, channel_0_of_subband: int):
-        # relate the antenna
-        pass
 
     def _get():
         t = telinfo.load_telescope_metadata("/opt/mnt/share/telinfo_ata.toml")
