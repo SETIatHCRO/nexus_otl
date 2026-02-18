@@ -18,7 +18,11 @@ classifiers = [
 dependencies = [
   "ATATools @ git+https://github.com/SETIatHCRO/ATA-Utils#egg=ATATools&subdirectory=pythonLibs",
   "brli @ git+https://github.com/MydonSolutions/BLRI",
-  grpcio,
+  casperfpga,
+  astropy,
+  pydantic,
+  fastapi,
+  uvicorn,
 ]
 dynamic = ["version"]
 

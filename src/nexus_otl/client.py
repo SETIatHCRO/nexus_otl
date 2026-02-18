@@ -1,33 +1,22 @@
-from __future__ import print_function
+# client.py
+import requests
+import json
 
-import logging
-import time
+url = 'http://localhost:8001/api/v1/otl/metadata' # The API endpoint URL
+try:
+    response = requests.post(url, data=json.dumps({
+        "keys":[
+            "/v1/observation/iers",
+            "/v1/observatory"
+        ]
+    }))
+    # Raise an exception for bad status codes (4xx or 5xx)
+    response.raise_for_status()
 
-import grpc
-import metadata_pb2
-import metadata_pb2_grpc
+    # The response data is often in JSON format, which can be converted to a Python dictionary
+    data = response.json()
+    print(json.dumps(data, indent=4))
+    print(f"Status Code: {response.status_code}")
 
-def run():
-    # NOTE(gRPC Python Team): .close() is possible on a channel and should be
-    # used in circumstances in which the with statement does not fit the needs
-    # of the code.
-    print("Requesting metadata ...")
-    with grpc.insecure_channel("localhost:50051") as channel:
-        stub = metadata_pb2_grpc.OTLStub(channel)
-        start_time = time.time()
-        response = stub.get_metadata(metadata_pb2.MetadataRequest(
-            keys=["/v1/observatory", "/v1/observation/iers"]
-        ))
-        stop_time = time.time()
-    keys = list(response.data.keys())
-    keys.sort()
-    print("Metadata received:\n", {
-        k: response.data[k]
-        for k in keys
-    })
-    print(f"\n... {len(keys)} scalars in {stop_time-start_time:0.3f} seconds")
-
-
-if __name__ == "__main__":
-    logging.basicConfig()
-    run()
+except requests.exceptions.RequestException as e:
+    print(f"An error occurred: {e}")

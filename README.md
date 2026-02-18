@@ -1,6 +1,3 @@
 # Observatory Transactional Layer
 
-
-## GRPC compilation
-
-`/src/nexus_otl$ python -m grpc_tools.protoc -I../../proto --python_out=. --pyi_out=. --grpc_python_out=. ../../proto/metadata.proto`
+REST gateway powered by FastAPI. See the HTTP "/docs" endpoint at the server's address.
