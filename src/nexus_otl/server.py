@@ -19,8 +19,8 @@ from dataclasses import dataclass
 from math import pi
 from os.path import join as join_as_path
 from typing import Any, Iterable
+import threading
 
-import asyncio
 import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -73,16 +73,16 @@ def _get_tuning_data(tunings: Iterable):
         for tuning in tunings
     }
 
-
-def _get_antlo_mapped_fengines(antenna_names: list[str], tunings: list[str]):
-    return {
-        AntLo(i.ANT_name, i.LO): ata_rfsoc_fengine.AtaRfsocFengine(
-            i.snap_hostname,
-            pipeline_id=int(i.snap_hostname[-1]) - 1,
-        )
-        for i in snap_config.get_ata_snap_tab().itertuples()
-        if i.ANT_name in antenna_names and i.LO in tunings
-    }
+def _get_antlo_mapped_fengines_generator(antenna_names: list[str], tunings: list[str]):
+    for i in snap_config.get_ata_snap_tab().itertuples():
+        if i.ANT_name in antenna_names and i.LO in tunings:
+            yield (
+                AntLo(i.ANT_name, i.LO),
+                ata_rfsoc_fengine.AtaRfsocFengine(
+                    i.snap_hostname,
+                    pipeline_id=int(i.snap_hostname[-1]) - 1,
+                )
+            )
 
 
 def read_chan_dest_ips(feng) -> list[ChannelSubbandDestinationDetail] | None:
@@ -158,12 +158,47 @@ def read_chan_dest_ips(feng) -> list[ChannelSubbandDestinationDetail] | None:
 def _disconnect_fengines(antlo_map_fengine: dict) -> None:
     """Disconnect all FPGA transports to avoid leaking file descriptors."""
     for antlo, feng in antlo_map_fengine.items():
-        try:
-            feng.fpga.set_log_level(logging.CRITICAL)
-            feng.fpga.disconnect()
-        except Exception:
-            pass
+        feng.fpga.set_log_level("CRITICAL")
+        feng.fpga.disconnect()
 
+
+@dataclass
+class FengineConnector:
+    _connections: dict[AntLo, ata_rfsoc_fengine.AtaRfsocFengine]
+    _lock: threading.Lock
+
+    def __init__(self):
+        self._connections = {}
+        self._lock = threading.Lock()
+
+    def __enter__(self):
+        self._lock.acquire()
+    
+    def __exit__(self, exc_type, exc_value, traceback):
+        self._lock.release()
+
+    def __getitem__(self, key: AntLo) -> ata_rfsoc_fengine.AtaRfsocFengine:
+        assert self._lock.locked, f"Use the context manager block!"
+        if isinstance(key, tuple):
+            key = AntLo(*key)
+        assert isinstance(key, AntLo)
+        if key not in self._connections:
+            # TODO better indexing of tuples...
+            for i in snap_config.get_ata_snap_tab().itertuples():
+                if i.ANT_name == key.antenna_name and i.LO == key.lo_id:
+                    self._connections[key] = ata_rfsoc_fengine.AtaRfsocFengine(
+                        i.snap_hostname,
+                        pipeline_id=int(i.snap_hostname[-1]) - 1,
+                    )
+                    break
+        # TODO manage reconnecting to the FEngine if programming has occurred
+        return self._connections[key]
+
+    def items(self):
+        with self:
+            for item in self._connections.items():
+                yield item
+        
 
 # ── Metadata collection ───────────────────────────────────────────────────────
 def _get_antenna_info(antennas: list[telinfo.AntennaDetail]) -> dict[str, Any]:
@@ -191,74 +226,74 @@ def _get_antenna_info(antennas: list[telinfo.AntennaDetail]) -> dict[str, Any]:
 
 
 def _get_antenna_fengine_info(
-    antlo_map_fengine: dict[str, ata_rfsoc_fengine.AtaRfsocFEngine]
+    antlo: AntLo,
+    feng: ata_rfsoc_fengine.AtaRfsocFEngine
 ) -> dict[str, Any]:
     md: dict[str, Any] = {}
-    for antlo, feng in antlo_map_fengine.items():
-        base = join_as_path(
-            "/v1/observatory/antenna",
-            antlo.antenna_name,
-            "fengine"
-        )
-        try:
-            md[join_as_path(base, "synctime")] = feng.fpga.read_int('sync_sync_time')
-        except:
-            pass
+    base = join_as_path(
+        "/v1/observatory/antenna",
+        antlo.antenna_name,
+        "fengine"
+    )
+    try:
+        md[join_as_path(base, "synctime")] = feng.fpga.read_int('sync_sync_time')
+    except:
+        pass
     
     return md
 
 def _get_antenna_tuning_band_info(
-    antlo_map_fengine,
+    antlo: AntLo,
+    feng: ata_rfsoc_fengine.AtaRfsocFEngine,
     tuning_map_freq: dict[str, float]
 ) -> dict[str, Any]:
-    antlo_map_chanband_details = {
-        antlo: read_chan_dest_ips(feng) for antlo, feng in antlo_map_fengine.items()
-    }
+    chanband_details = read_chan_dest_ips(feng)
 
     md: dict[str, Any] = {}
-    for antlo, chanband_details in antlo_map_chanband_details.items():
-        if chanband_details is None:
-            continue
-        base = join_as_path(
-            "/v1/observatory/antenna",
-            antlo.antenna_name,
-            "tunings",
-            antlo.lo_id,
-            "bands",
+    if chanband_details is None:
+        return md
+    base = join_as_path(
+        "/v1/observatory/antenna",
+        antlo.antenna_name,
+        "tunings",
+        antlo.lo_id,
+        "bands",
+    )
+    fengine_n_chans = feng.n_chans_f
+    fengine_n_bits = 8
+    fengine_meta = hpguppi_defaults.fengine_meta_key_values(fengine_n_bits, fengine_n_chans)
+    fengine_center_chan = fengine_meta["FENCHAN"] / 2
+    fengine_chan_bw = fengine_meta["FOFF"]
+
+    lo_obsfreq = tuning_map_freq[antlo.lo_id]
+    chanband_details.sort(key=lambda csdd: csdd.start)
+
+    md[join_as_path(base, "len")] = len(chanband_details)
+    for band_idx, chanband in enumerate(chanband_details):
+        chan_path = join_as_path(base, str(band_idx))
+        md[join_as_path(chan_path, "channel_start")] = chanband.start
+        md[join_as_path(chan_path, "channel_stop")] = chanband.stop
+        md[join_as_path(chan_path, "address")] = chanband.destination_ip
+
+        chanband_width = chanband.stop - chanband.start
+        band_center_chan = chanband_width / 2 + chanband.start + 0.5
+        band_center_freq = (
+            lo_obsfreq + (band_center_chan - fengine_center_chan - 0.5) * fengine_chan_bw
         )
-        fengine_n_chans = antlo_map_fengine[antlo].n_chans_f
-        fengine_n_bits = 8
-        fengine_meta = hpguppi_defaults.fengine_meta_key_values(fengine_n_bits, fengine_n_chans)
-        fengine_center_chan = fengine_meta["FENCHAN"] / 2
-        fengine_chan_bw = fengine_meta["FOFF"]
 
-        lo_obsfreq = tuning_map_freq[antlo.lo_id]
-        chanband_details.sort(key=lambda csdd: csdd.start)
-
-        md[join_as_path(base, "len")] = len(chanband_details)
-        for band_idx, chanband in enumerate(chanband_details):
-            chan_path = join_as_path(base, str(band_idx))
-            md[join_as_path(chan_path, "channel_start")] = chanband.start
-            md[join_as_path(chan_path, "channel_stop")] = chanband.stop
-            md[join_as_path(chan_path, "address")] = chanband.destination_ip
-
-            chanband_width = chanband.stop - chanband.start
-            band_center_chan = chanband_width / 2 + chanband.start + 0.5
-            band_center_freq = (
-                lo_obsfreq + (band_center_chan - fengine_center_chan - 0.5) * fengine_chan_bw
-            )
-
-            md[join_as_path(chan_path, "frequency_start")] = (
-                band_center_freq - fengine_chan_bw * chanband_width / 2
-            )
-            md[join_as_path(chan_path, "frequency_stop")] = (
-                band_center_freq + fengine_chan_bw * chanband_width / 2
-            )
+        md[join_as_path(chan_path, "frequency_start")] = (
+            band_center_freq - fengine_chan_bw * chanband_width / 2
+        )
+        md[join_as_path(chan_path, "frequency_stop")] = (
+            band_center_freq + fengine_chan_bw * chanband_width / 2
+        )
 
     return md
 
 
-def get_observatory() -> dict[str, Any]:
+def get_observatory(
+    fengine_connector: FengineConnector
+) -> dict[str, Any]:
     t = telinfo.load_telescope_metadata("/opt/mnt/share/telinfo_ata.toml")
     md: dict[str, Any] = {}
     md[join_as_path("/v1/observatory", "time")] = time.time()
@@ -269,25 +304,31 @@ def get_observatory() -> dict[str, Any]:
     md.update(_get_antenna_info(t.antennas))
     
     tunings = "abcd"
-    antlo_map_fengine = _get_antlo_mapped_fengines(
-        [ant.name for ant in t.antennas],
-        tunings=tunings
-    )
     tuning_map_freq = _get_tuning_data(tunings)
-    try:
-        md.update(
-            _get_antenna_tuning_band_info(
-                antlo_map_fengine,
-                tuning_map_freq
+    with fengine_connector:
+        for antlo in [
+            AntLo(antname, tuning)
+            for antname in [ant.name for ant in t.antennas]
+            for tuning in tunings
+        ]:
+            try:
+                feng = fengine_connector[antlo]
+            except KeyError:
+                continue
+
+            md.update(
+                _get_antenna_tuning_band_info(
+                    antlo,
+                    feng,
+                    tuning_map_freq
+                )
             )
-        )
-        md.update(
-            _get_antenna_fengine_info(
-                antlo_map_fengine
+            md.update(
+                _get_antenna_fengine_info(
+                    antlo,
+                    feng
+                )
             )
-        )
-    finally:
-        _disconnect_fengines(antlo_map_fengine)
 
     return md
 
@@ -304,6 +345,7 @@ def get_iers() -> dict[str, Any]:
     md[join_as_path("/v1/observation/iers", "ut1_utc")] = (
         iers_table.ut1_utc(today.jd1, today.jd2).to(units.s).value
     )
+    iers_table.close()
     return md
 
 
@@ -320,7 +362,7 @@ def _value_type(v: Any) -> str:
         return "f64"
 
 
-def _collect_metadata(keys: list[str]) -> dict[str, Any]:
+def _collect_metadata(keys: list[str], fengine_connector: FengineConnector) -> dict[str, Any]:
     """Collect metadata for the given keys (or all if empty).
 
     Returns flat list format::
@@ -337,10 +379,10 @@ def _collect_metadata(keys: list[str]) -> dict[str, Any]:
     start = time.time()
 
     if not keys:
-        md_dict.update(get_observatory())
+        md_dict.update(get_observatory(fengine_connector))
     for key in keys:
         if key == "/v1/observatory":
-            md_dict.update(get_observatory())
+            md_dict.update(get_observatory(fengine_connector))
         elif key == "/v1/observation/iers":
             md_dict.update(get_iers())
         else:
@@ -368,6 +410,7 @@ def _collect_metadata(keys: list[str]) -> dict[str, Any]:
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 app = FastAPI(title="OTL Metadata Server")
 
+fengine_connector = FengineConnector()
 
 class MetadataRequest(BaseModel):
     keys: list[str] = []
@@ -375,7 +418,8 @@ class MetadataRequest(BaseModel):
 
 @app.post("/api/v1/otl/metadata")
 async def query_metadata(body: MetadataRequest) -> dict:
-    return _collect_metadata(body.keys)
+    global fengine_connector
+    return _collect_metadata(body.keys, fengine_connector)
 
 
 @app.get("/api/v1/meta/ping")
