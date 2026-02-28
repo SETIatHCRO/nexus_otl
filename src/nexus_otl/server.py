@@ -55,6 +55,7 @@ class ChannelSubbandDestinationDetail:
     start: int
     stop: int
     nof_packet_streams: int
+    nof_bits: int
 
 
 @dataclass
@@ -149,6 +150,7 @@ def read_chan_dest_ips(feng) -> list[ChannelSubbandDestinationDetail] | None:
                     start=strm_detail.start_chan,
                     stop=strm_end_chan,
                     nof_packet_streams=int(n_strm),
+                    nof_bits=8 if strm_detail.is_8bit else 4,
                 )
             )
 
@@ -237,6 +239,12 @@ def _get_antenna_fengine_info(
     )
     try:
         md[join_as_path(base, "synctime")] = feng.fpga.read_int('sync_sync_time')
+        fengine_n_chans = feng.n_chans_f
+        fengine_n_bits = 8 # should read from packet_details
+        fengine_meta = hpguppi_defaults.fengine_meta_key_values(fengine_n_bits, fengine_n_chans)
+        md[join_as_path(base, "nof_channels")] = fengine_n_chans
+        md[join_as_path(base, "channel_bandwidth")] = fengine_meta["FOFF"]
+        md[join_as_path(base, "sample_period")] = fengine_meta['TBIN']
     except:
         pass
     
@@ -259,9 +267,10 @@ def _get_antenna_tuning_band_info(
         antlo.lo_id,
         "bands",
     )
-    fengine_n_chans = feng.n_chans_f
-    fengine_n_bits = 8
-    fengine_meta = hpguppi_defaults.fengine_meta_key_values(fengine_n_bits, fengine_n_chans)
+    fengine_n_bits = set(d.nof_bits for d in chanband_details)
+    assert len(fengine_n_bits) == 1, f"Mulitple bit widths in channels of F-Engine ({antlo}): {fengine_n_bits}"
+    fengine_n_bits = fengine_n_bits.pop()
+    fengine_meta = hpguppi_defaults.fengine_meta_key_values(fengine_n_bits, feng.n_chans_f)
     fengine_center_chan = fengine_meta["FENCHAN"] / 2
     fengine_chan_bw = fengine_meta["FOFF"]
 
