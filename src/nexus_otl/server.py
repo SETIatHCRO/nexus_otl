@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from math import pi
 from os.path import join as join_as_path
 from typing import Any, Iterable
+import struct
+import base64
 import threading
 
 import uvicorn
@@ -226,6 +228,83 @@ def _get_antenna_info(antennas: list[telinfo.AntennaDetail]) -> dict[str, Any]:
 
     return md
 
+def _get_antenna_tuning_weights(tuning: str, antenna_name_map_channel_range: dict[str, tuple[int,int]]):
+    with open(f"/opt/mnt/share/weights_{tuning}.bin", "rb") as fio:
+        int_bytes = fio.read(struct.calcsize("<i"))
+        fio_nants = struct.unpack("<i", int_bytes)[0]
+
+        int_bytes = fio.read(struct.calcsize("<i"))
+        fio_nchan = struct.unpack("<i", int_bytes)[0]
+
+        int_bytes = fio.read(struct.calcsize("<i"))
+        fio_npol = struct.unpack("<i", int_bytes)[0]
+
+        ant_name_string = ""
+        ant_names = []
+        while len(ant_names) < fio_nants:
+            ant_char = fio.read(1).decode("ascii")
+            if ant_char == "\0":
+                ant_names.append(ant_name_string)
+                ant_name_string = ""
+                continue
+
+            assert ant_char.isalnum(), f"Unexpected character for antenna name: '{ant_char}' at byte {fio.tell()}"
+            ant_name_string += ant_char
+
+        fio_weights_offset = fio.tell()
+        fio_weight_size = struct.calcsize("<2d")
+
+        antenna_weights = {}
+        for ant_name, channel_range in antenna_name_map_channel_range.items():
+            ant_index = ant_names.index(ant_name)
+            assert channel_range[0] >= 0 and channel_range[0] < fio_nchan, f"Channel range for '{ant_name}' lower bound is out of range [0, {fio_nchan}]: {channel_range[0]}"
+            assert channel_range[1] > channel_range[0] and channel_range[1] < fio_nchan, f"Channel range for '{ant_name}' upper bound is out of range [{channel_range[0]}, {fio_nchan}]: {channel_range[1]}"
+
+            fio.seek(
+                fio_weights_offset
+                + ant_index*fio_nchan*fio_npol*fio_weight_size
+                + channel_range[0]*fio_npol*fio_weight_size
+            )
+            antenna_weights[ant_name] = [
+                complex(*struct.unpack(
+                    '<2d',
+                    fio.read(fio_weight_size)
+                ))
+                for _ in range(channel_range[1]-channel_range[0])
+            ]
+        return antenna_weights
+
+
+def _get_antenna_tuning_band_weight_info(antenna_name_map_tuning_band_channel_range: dict[str, list[tuple[int,int]]], tuning: str):
+    ant_map_weights = _get_antenna_tuning_weights(
+        tuning,
+        {
+            ant_name: (
+                0,
+                max(cr[1] for cr in band_chanrange),
+            )
+            for ant_name, band_chanrange in antenna_name_map_tuning_band_channel_range.items()
+        }
+    )
+
+    md: dict[str, Any] = {}
+    for ant_name, ant_weights in ant_map_weights.items():
+        base = join_as_path(
+            "/v1/observatory/antenna",
+            ant_name,
+            "tunings",
+            tuning,
+            "bands",
+        )
+        antband_chanranges = antenna_name_map_tuning_band_channel_range[ant_name]
+        md[join_as_path(base, "len")] = len(antband_chanranges)
+        for band_idx, band_chanrange in enumerate(antband_chanranges):
+            md[join_as_path(base, str(band_idx), "weights")] = base64.b64encode(
+                b''.join(struct.pack("<dd", w.real, w.imag) for w in ant_weights[band_chanrange[0]:band_chanrange[1]])
+            )
+    
+    return md
+
 
 def _get_antenna_fengine_info(
     antlo: AntLo,
@@ -316,8 +395,8 @@ def get_observatory(
     tuning_map_freq = _get_tuning_data(tunings)
     with fengine_connector:
         for antlo in [
-            AntLo(antname, tuning)
-            for antname in [ant.name for ant in t.antennas]
+            AntLo(ant.name, tuning)
+            for ant in t.antennas
             for tuning in tunings
         ]:
             try:
@@ -338,6 +417,54 @@ def get_observatory(
                     feng
                 )
             )
+
+    for tuning in tunings:
+        md.update(_get_antenna_tuning_band_weight_info(
+            {
+                ant.name: [
+                    (
+                        md[join_as_path(
+                            "/v1/observatory/antenna",
+                            ant.name,
+                            "tunings",
+                            tuning,
+                            "bands",
+                            str(band_idx),
+                            "channel_start"
+                        )],
+                        md[join_as_path(
+                            "/v1/observatory/antenna",
+                            ant.name,
+                            "tunings",
+                            tuning,
+                            "bands",
+                            str(band_idx),
+                            "channel_stop"
+                        )]
+                    )
+                    for band_idx in range(int(md[
+                        join_as_path(
+                            "/v1/observatory/antenna",
+                            ant.name,
+                            "tunings",
+                            tuning,
+                            "bands",
+                            "len"
+                        )
+                    ]))
+                ]
+                for ant in t.antennas
+                if join_as_path(
+                    "/v1/observatory/antenna",
+                    ant.name,
+                    "tunings",
+                    tuning,
+                    "bands",
+                    "len"
+                ) in md
+            },
+            tuning
+        ))
 
     return md
 
@@ -363,6 +490,8 @@ def _value_type(v: Any) -> str:
     """Return the type tag for a Python value."""
     if isinstance(v, str):
         return "string"
+    elif isinstance(v, bytes):
+        return "vec<b64>"
     elif isinstance(v, bool):
         return "u32"
     elif isinstance(v, int):
