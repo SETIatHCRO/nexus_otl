@@ -40,6 +40,7 @@ from SNAPobs import snap_config
 from SNAPobs.snap_hpguppi import snap_hpguppi_defaults as hpguppi_defaults
 
 log = logging.getLogger("otl-server")
+logging.getLogger("ATATools.ata_control").setLevel(logging.WARNING)
 
 # ── Data classes ──────────────────────────────────────────────────────────────
 @dataclass(frozen=True)
@@ -205,13 +206,33 @@ class FengineConnector:
         
 
 # ── Metadata collection ───────────────────────────────────────────────────────
+def _safe_ata_control_get(func, antenna_names):
+    ret = {}
+    for ant_name in antenna_names:
+        try:
+            ret.update(
+                func([ant_name])
+            )
+        except:
+            ret.update({ant_name: None})
+    return ret
+
 def _get_antenna_info(antennas: list[telinfo.AntennaDetail]) -> dict[str, Any]:
     md: dict[str, Any] = {}
 
     antenna_names = [ad.name for ad in antennas]
-    ant_map_source = ata_control.get_eph_source(antenna_names)
-    ant_map_radec = ata_control.get_ra_dec(antenna_names)
-    ant_map_azel = ata_control.get_az_el(antenna_names)
+    ant_map_source = _safe_ata_control_get(
+        ata_control.get_eph_source,
+        antenna_names
+    )
+    ant_map_radec = _safe_ata_control_get(
+        ata_control.get_ra_dec,
+        antenna_names
+    )
+    ant_map_azel = _safe_ata_control_get(
+        ata_control.get_az_el,
+        antenna_names
+    )
 
     for ant_detail in antennas:
         base = join_as_path("/v1/observatory/antenna", ant_detail.name)
@@ -220,11 +241,14 @@ def _get_antenna_info(antennas: list[telinfo.AntennaDetail]) -> dict[str, Any]:
         for i, p in enumerate("xyz"):
             md[join_as_path(base, "position", p)] = ant_detail.position[i]
 
-        md[join_as_path(base, "pointing", "source_name")] = ant_map_source[ant_detail.name]
-        md[join_as_path(base, "pointing", "ra")] = ant_map_radec[ant_detail.name][0] * pi / 12
-        md[join_as_path(base, "pointing", "dec")] = ant_map_radec[ant_detail.name][1] * pi / 180
-        md[join_as_path(base, "pointing", "az")] = ant_map_azel[ant_detail.name][0] * pi / 180
-        md[join_as_path(base, "pointing", "el")] = ant_map_azel[ant_detail.name][1] * pi / 180
+        if ant_map_source[ant_detail.name] is not None:
+            md[join_as_path(base, "pointing", "source_name")] = ant_map_source[ant_detail.name]
+        if ant_map_radec[ant_detail.name] is not None:
+            md[join_as_path(base, "pointing", "ra")] = ant_map_radec[ant_detail.name][0] * pi / 12
+            md[join_as_path(base, "pointing", "dec")] = ant_map_radec[ant_detail.name][1] * pi / 180
+        if ant_map_azel[ant_detail.name] is not None:
+            md[join_as_path(base, "pointing", "az")] = ant_map_azel[ant_detail.name][0] * pi / 180
+            md[join_as_path(base, "pointing", "el")] = ant_map_azel[ant_detail.name][1] * pi / 180
 
     return md
 
