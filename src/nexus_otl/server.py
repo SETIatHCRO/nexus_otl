@@ -22,6 +22,7 @@ from typing import Any, Iterable
 import struct
 import base64
 import threading
+import socket
 
 import uvicorn
 from fastapi import FastAPI
@@ -35,6 +36,8 @@ from astropy.utils import iers
 from ata_snap import ata_rfsoc_fengine
 import casperfpga
 
+from ATATools.ata_rest import ATARest
+# ATARest._debug = True
 from ATATools import ata_control
 from SNAPobs import snap_config
 from SNAPobs.snap_hpguppi import snap_hpguppi_defaults as hpguppi_defaults
@@ -54,6 +57,8 @@ class AntLo:
 
 @dataclass
 class ChannelSubbandDestinationDetail:
+    source_ip: str
+    source_port: int
     destination_ip: str
     start: int
     stop: int
@@ -77,6 +82,7 @@ def _get_tuning_data(tunings: Iterable):
         for tuning in tunings
     }
 
+
 def _get_antlo_mapped_fengines_generator(antenna_names: list[str], tunings: list[str]):
     for i in snap_config.get_ata_snap_tab().itertuples():
         if i.ANT_name in antenna_names and i.LO in tunings:
@@ -91,6 +97,8 @@ def _get_antlo_mapped_fengines_generator(antenna_names: list[str], tunings: list
 
 def read_chan_dest_ips(feng) -> list[ChannelSubbandDestinationDetail] | None:
     interface_map_enabled = {}
+    gbe_keys = list(feng.fpga.gbes.keys())
+    gbe_keys.sort()
     for interface in range(feng.n_interfaces):
         try:
             interface_map_enabled[interface] = (
@@ -136,6 +144,13 @@ def read_chan_dest_ips(feng) -> list[ChannelSubbandDestinationDetail] | None:
                         )
                     )
 
+        try:
+            gbe = feng.fpga.gbes[gbe_keys[feng.output_id]]
+        except IndexError:
+            log.warning(f"FEngine {feng.host} has output_id ({feng.output_id}) that is out of range ({len(gbe_keys)}). Falling back to interface {interface}.")
+            gbe = feng.fpga.gbes[gbe_keys[interface]]
+
+        src_ip, src_port = str(gbe.ip_address), gbe.port
         for strm_detail in strm_details:
             strm_end_chan = strm_detail.end_chan + strm_detail.packet_nchan
             strm_nchans = strm_end_chan - strm_detail.start_chan
@@ -149,6 +164,8 @@ def read_chan_dest_ips(feng) -> list[ChannelSubbandDestinationDetail] | None:
 
             channel_subbands.append(
                 ChannelSubbandDestinationDetail(
+                    source_ip=src_ip,
+                    source_port=src_port,
                     destination_ip=strm_detail.destination_ip,
                     start=strm_detail.start_chan,
                     stop=strm_end_chan,
@@ -195,6 +212,7 @@ class FengineConnector:
                         i.snap_hostname,
                         pipeline_id=int(i.snap_hostname[-1]) - 1,
                     )
+                    self._connections[key].fpga.get_system_information()
                     break
         # TODO manage reconnecting to the FEngine if programming has occurred
         return self._connections[key]
@@ -221,18 +239,9 @@ def _get_antenna_info(antennas: list[telinfo.AntennaDetail]) -> dict[str, Any]:
     md: dict[str, Any] = {}
 
     antenna_names = [ad.name for ad in antennas]
-    ant_map_source = _safe_ata_control_get(
-        ata_control.get_eph_source,
-        antenna_names
-    )
-    ant_map_radec = _safe_ata_control_get(
-        ata_control.get_ra_dec,
-        antenna_names
-    )
-    ant_map_azel = _safe_ata_control_get(
-        ata_control.get_az_el,
-        antenna_names
-    )
+    ant_map_source = ata_control.get_eph_source(antenna_names)
+    ant_map_radec = ata_control.get_ra_dec(antenna_names)
+    ant_map_azel = ata_control.get_az_el(antenna_names)
 
     for ant_detail in antennas:
         base = join_as_path("/v1/observatory/antenna", ant_detail.name)
@@ -338,6 +347,8 @@ def _get_antenna_fengine_info(
     base = join_as_path(
         "/v1/observatory/antenna",
         antlo.antenna_name,
+        "tunings",
+        antlo.lo_id,
         "fengine"
     )
     try:
@@ -348,6 +359,10 @@ def _get_antenna_fengine_info(
         md[join_as_path(base, "nof_channels")] = fengine_n_chans
         md[join_as_path(base, "channel_bandwidth")] = fengine_meta["FOFF"]
         md[join_as_path(base, "sample_period")] = fengine_meta['TBIN']
+
+        md[join_as_path(base, "hostname")] = feng.host
+        md[join_as_path(base, "ip_address")] = socket.gethostbyname(feng.host)
+        md[join_as_path(base, "pipeline_id")] = feng.pipeline_id
     except:
         pass
     
@@ -386,6 +401,8 @@ def _get_antenna_tuning_band_info(
         md[join_as_path(chan_path, "channel_start")] = chanband.start
         md[join_as_path(chan_path, "channel_stop")] = chanband.stop
         md[join_as_path(chan_path, "address")] = chanband.destination_ip
+        md[join_as_path(chan_path, "source_address")] = chanband.source_ip
+        md[join_as_path(chan_path, "source_port")] = chanband.source_port
 
         chanband_width = chanband.stop - chanband.start
         band_center_chan = chanband_width / 2 + chanband.start + 0.5
@@ -425,6 +442,9 @@ def get_observatory(
         ]:
             try:
                 feng = fengine_connector[antlo]
+            except casperfpga.transport_katcp.KatcpRequestFail:
+                log.warning(f"Katcp Request Failed for {antlo}")
+                continue
             except KeyError:
                 continue
 
